@@ -28,6 +28,8 @@ export const env = {
   // Online payments (optional). When both are set, Razorpay checkout is enabled.
   razorpayKeyId: optional('RAZORPAY_KEY_ID', ''),
   razorpayKeySecret: optional('RAZORPAY_KEY_SECRET', ''),
+  // Razorpay webhook secret for verifying webhook signatures
+  razorpayWebhookSecret: optional('RAZORPAY_WEBHOOK_SECRET', ''),
   // Email notifications (optional). Uses the Resend HTTP API when configured.
   resendApiKey: optional('RESEND_API_KEY', ''),
   emailFrom: optional('EMAIL_FROM', ''),

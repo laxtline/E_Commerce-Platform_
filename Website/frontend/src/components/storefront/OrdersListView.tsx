@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useEffect } from "react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { fetchMyOrders } from "@/store/ordersSlice";
+import { fetchMyOrders, loadMoreOrders } from "@/store/ordersSlice";
 import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
@@ -32,11 +32,17 @@ function SignInPrompt() {
 
 function Orders() {
   const dispatch = useAppDispatch();
-  const { list, listStatus } = useAppSelector((s) => s.orders);
+  const { list, listStatus, nextCursor, currentPage, totalPages, loadingMore } = useAppSelector((s) => s.orders);
 
   useEffect(() => {
-    dispatch(fetchMyOrders());
-  }, [dispatch]);
+    if (listStatus === "idle") dispatch(fetchMyOrders());
+  }, [dispatch, listStatus]);
+
+  const handleLoadMore = () => {
+    if (currentPage < totalPages && !loadingMore) {
+      dispatch(loadMoreOrders(currentPage + 1));
+    }
+  };
 
   if (listStatus === "loading" && list.length === 0) {
     return (
@@ -62,7 +68,7 @@ function Orders() {
   }
 
   return (
-    <ul className="space-y-3">
+    <div className="space-y-3">
       {list.map((order) => {
         const count = order.items.reduce((n, i) => n + i.quantity, 0);
         const placed = order.createdAt ? new Date(order.createdAt).toLocaleDateString("en-IN", {
@@ -93,6 +99,13 @@ function Orders() {
           </li>
         );
       })}
-    </ul>
+      {currentPage < totalPages && (
+        <div className="text-center py-4">
+          <Button variant="outline" onClick={handleLoadMore} loading={loadingMore}>
+            {loadingMore ? "Loading..." : `Load more (page ${currentPage + 1} of ${totalPages})`}
+          </Button>
+        </div>
+      )}
+    </div>
   );
 }

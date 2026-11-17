@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import * as SecureStore from 'expo-secure-store';
 import type { ApiResponse } from '@shared/types';
 
 // API base URL. Reads app.json -> expo.extra.apiUrl. When testing on a physical
@@ -9,6 +10,8 @@ export const API_URL =
 
 export const STOREFRONT_URL = (Constants.expoConfig?.extra as { storefrontUrl?: string } | undefined)?.storefrontUrl ?? '';
 
+const TOKEN_KEY = 'rt_token';
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -18,9 +21,17 @@ export class ApiError extends Error {
 }
 
 // Thin fetch wrapper: sends/receives JSON and unwraps the { success, data } envelope.
+// Includes auth token from SecureStore if available.
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+  // Get auth token from SecureStore
+  const token = await SecureStore.getItemAsync(TOKEN_KEY);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...(options.headers as Record<string, string> | undefined) };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
   const res = await fetch(`${API_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers ?? {}) },
+    headers,
     ...options,
   });
 

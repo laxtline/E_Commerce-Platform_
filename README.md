@@ -57,7 +57,7 @@ ramachandra-traders/
 │       │   └── store/         # Redux Toolkit slices
 │       └── package.json
 │
-├── AndroidApp/           # React Native + Expo (runs on iOS/Android)
+├── MobileApp/            # React Native + Expo (runs on iOS/Android)
 │   ├── app/              # Expo Router file-based routing
 │   ├── components/       # UI components
 │   ├── src/
@@ -170,7 +170,7 @@ npm run dev         # Starts on http://localhost:3000
 
 ### Mobile App Setup
 ```bash
-cd AndroidApp
+cd MobileApp
 npm install
 npx expo start      # Scan QR with Expo Go, or press 'a' for Android emulator
 ```
@@ -234,6 +234,7 @@ npm run lint          # ESLint + Prettier
 
 ### Mobile
 ```bash
+cd MobileApp
 npx expo start        # Dev server
 npx expo start --android   # Android emulator
 npx expo start --ios       # iOS simulator

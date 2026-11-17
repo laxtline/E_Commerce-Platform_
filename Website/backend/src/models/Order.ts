@@ -72,6 +72,8 @@ const refundSchema = new Schema(
     status: { type: String, enum: ['PENDING', 'COMPLETED', 'FAILED'], default: 'PENDING' },
     processedAt: { type: Date, default: null },
     processedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    // Razorpay refund reference (for online payment refunds)
+    razorpayRefundId: { type: String, default: '' },
   },
   { _id: false }
 );
@@ -95,6 +97,7 @@ const orderSchema = new Schema(
     },
     itemsTotal: { type: Number, required: true, min: 0 },
     deliveryFee: { type: Number, required: true, min: 0, default: 0 },
+    heavyProductFee: { type: Number, required: true, min: 0, default: 0 },
     couponCode: { type: String, default: '' },
     coupon: { type: Schema.Types.ObjectId, ref: 'Coupon', default: null },
     couponSnapshot: { type: Schema.Types.Mixed, default: null },
@@ -106,6 +109,9 @@ const orderSchema = new Schema(
     statusHistory: { type: [statusHistorySchema], default: [] },
     returnRequest: { type: returnRequestSchema, default: {} },
     refund: { type: refundSchema, default: {} },
+    // COD cash collection tracking
+    cashCollectedAt: { type: Date, default: null },
+    collectedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
   },
   { timestamps: true }
 );

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 
 /** Route-level error boundary. Shown when a page throws during render/data fetch. */
@@ -21,9 +22,9 @@ export default function Error({ error, reset }: { error: Error & { digest?: stri
       </p>
       <div className="mt-6 flex gap-3">
         <Button onClick={reset}>Try again</Button>
-        <a href="/">
+        <Link href="/">
           <Button variant="outline">Back to home</Button>
-        </a>
+        </Link>
       </div>
     </div>
   );

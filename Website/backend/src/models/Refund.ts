@@ -23,6 +23,8 @@ const refundSchema = new Schema(
     processedAt: { type: Date, default: null },
     processedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     adminNotes: { type: String, default: '' },
+    // Razorpay refund reference (for online payment refunds)
+    razorpayRefundId: { type: String, default: '' },
   },
   { timestamps: true }
 );

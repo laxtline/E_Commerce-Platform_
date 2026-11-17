@@ -17,6 +17,8 @@ import {
   completeRefund,
   listRefunds,
   getOrderTracking,
+  collectCash,
+  generateInvoice,
 } from "../controllers/orderController.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { requireAuth, requireAdmin } from "../middleware/auth.js";
@@ -37,6 +39,9 @@ router.patch("/:id/status", requireAdmin, validateBody(orderStatusSchema), async
 
 // Admin: courier tracking
 router.put("/:id/courier", requireAdmin, asyncHandler(updateCourierInfo));
+
+// Admin: COD cash collection
+router.post("/:id/collect-cash", requireAdmin, asyncHandler(collectCash));
 
 // Admin: returns
 router.get("/admin/returns", requireAdmin, asyncHandler(listReturns));
@@ -59,5 +64,8 @@ router.get("/:id/return", asyncHandler(getReturnStatus));
 
 // User: tracking
 router.get("/:id/track", asyncHandler(getOrderTracking));
+
+// User: invoice PDF
+router.get("/:id/invoice", asyncHandler(generateInvoice));
 
 export default router;

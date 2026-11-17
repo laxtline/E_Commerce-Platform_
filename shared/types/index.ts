@@ -1,4 +1,4 @@
-// Shared API contracts and domain types used by Website, AndroidApp and iOSApp.
+// Shared API contracts and domain types used by Website, MobileApp and iOSApp.
 // This is the single source of truth — do not redefine these in any app.
 
 export type Role = 'ADMIN' | 'USER';
@@ -289,6 +289,7 @@ export interface Order {
   status: OrderStatus;
   itemsTotal: number;
   deliveryFee: number;
+  heavyProductFee?: number;
   couponCode?: string;
   discount?: number;
   total: number;

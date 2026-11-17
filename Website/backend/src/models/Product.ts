@@ -30,6 +30,8 @@ const productSchema = new Schema(
     bulkPricing: { type: [bulkPricingSchema], default: [] },
     gstRate: { type: Number, default: 18, min: 0 },
     weight: { type: Number, default: 0, min: 0 }, // kg
+    // Reserved stock for orders awaiting payment confirmation
+    reservedStock: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
 );

@@ -1,0 +1,359 @@
+{
+  "date": "2026-11-10",
+  "fixture": "Isolated single-node MongoDB replica set; synthetic auth sessions; no external payments or email",
+  "results": [
+    {
+      "name": "public catalog",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "unauthenticated cart rejected",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "customer admin access rejected",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "invalid Google token rejected",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "session restores correct customer",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "add cart",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "cart persisted in database",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "oversized quantity rejected",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "wishlist add",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "wishlist reload persists",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "wishlist remove",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "saved address persists",
+      "pass": true,
+      "detail": 201
+    },
+    {
+      "name": "admin coupon create",
+      "pass": true,
+      "detail": "Coupon created."
+    },
+    {
+      "name": "coupon uses server cart instead of client total",
+      "pass": true,
+      "detail": {
+        "code": "AUDIT10",
+        "type": "PERCENT",
+        "value": 10,
+        "discount": 50.4,
+        "eligibleTotal": 504,
+        "itemsTotal": 504,
+        "deliveryFee": 49,
+        "total": 502.6
+      }
+    },
+    {
+      "name": "COD order commits with server pricing",
+      "pass": true,
+      "detail": {
+        "status": 201,
+        "total": 502.6,
+        "message": "Order placed successfully."
+      }
+    },
+    {
+      "name": "order saved to database",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "stock deducted once",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "cart clears after commit",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "other customer cannot read order",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "invalid order jump rejected",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "order transition CONFIRMED",
+      "pass": true,
+      "detail": "Order marked CONFIRMED."
+    },
+    {
+      "name": "order transition PACKED",
+      "pass": true,
+      "detail": "Order marked PACKED."
+    },
+    {
+      "name": "order transition SHIPPED",
+      "pass": true,
+      "detail": "Order marked SHIPPED."
+    },
+    {
+      "name": "order transition OUT_FOR_DELIVERY",
+      "pass": true,
+      "detail": "Order marked OUT_FOR_DELIVERY."
+    },
+    {
+      "name": "order transition DELIVERED",
+      "pass": true,
+      "detail": "Order marked DELIVERED."
+    },
+    {
+      "name": "delivered COD has a recorded payment",
+      "pass": false,
+      "detail": {
+        "paymentStatus": "PENDING",
+        "note": "Currently deliberately PENDING; no collection API/UI exists."
+      }
+    },
+    {
+      "name": "courier update succeeds",
+      "pass": true,
+      "detail": "Courier info updated."
+    },
+    {
+      "name": "courier history contains real order status",
+      "pass": false,
+      "detail": {
+        "status": "$status",
+        "timestamp": "2026-11-09T19:19:18.393Z",
+        "note": "Courier info updated: DTDC - AUDIT123"
+      }
+    },
+    {
+      "name": "tracking returns saved courier",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "review saves and rating updates",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "return request persists",
+      "pass": true,
+      "detail": "Return requested. Admin will review."
+    },
+    {
+      "name": "return cannot skip approval and refund payment",
+      "pass": false,
+      "detail": {
+        "status": 200,
+        "stored": "REFUNDED"
+      }
+    },
+    {
+      "name": "refund cannot exceed order amount",
+      "pass": false,
+      "detail": {
+        "status": 201,
+        "amount": 999999,
+        "message": "Refund initiated."
+      }
+    },
+    {
+      "name": "online order can be reserved",
+      "pass": true,
+      "detail": "Order placed successfully."
+    },
+    {
+      "name": "failed payment excluded from revenue",
+      "pass": false,
+      "detail": {
+        "revenue": 599.6
+      }
+    },
+    {
+      "name": "webhook verifies exact signed bytes",
+      "pass": false,
+      "detail": {
+        "status": 400,
+        "message": "Invalid signature."
+      }
+    },
+    {
+      "name": "cancelled online order not marked paid by webhook",
+      "pass": false,
+      "detail": {
+        "http": 200,
+        "status": "CANCELLED",
+        "paymentStatus": "PAID"
+      }
+    },
+    {
+      "name": "malformed webhook signature returns client error",
+      "pass": false,
+      "detail": {
+        "status": 500
+      }
+    },
+    {
+      "name": "local upload writes image",
+      "pass": true,
+      "detail": {
+        "url": "http://127.0.0.1:53118/uploads/1794251958674-e289fcaa9fc7.png"
+      }
+    },
+    {
+      "name": "uploaded image can be fetched",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "uploaded image can be saved on product",
+      "pass": false,
+      "detail": {
+        "status": 400,
+        "message": "Provide up to 20 valid HTTPS ImageKit image URLs (ik.imagekit.io)."
+      }
+    },
+    {
+      "name": "mobile cart merge persists",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "mobile merge retry idempotent",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "cart update persists",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "cart remove persists",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "address update persists",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "address delete persists",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "brand update persists",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "category create",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "product create",
+      "pass": true,
+      "detail": "Product created."
+    },
+    {
+      "name": "product update persists",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "search finds matching product",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "catalog cursor returns distinct second page",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "product delete",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "deleted product hidden publicly",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "coupon update",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "coupon usage recorded",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "review delete resets rating",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "cancel restores stock",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "repeat cancellation does not duplicate stock",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "cleanup releases failed online payment reservation",
+      "pass": false,
+      "detail": ""
+    },
+    {
+      "name": "logout endpoint succeeds",
+      "pass": true,
+      "detail": ""
+    }
+  ]
+}

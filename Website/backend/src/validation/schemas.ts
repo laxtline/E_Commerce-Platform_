@@ -51,7 +51,7 @@ export const orderStatusSchema: BodySchema = {
   status: {
     type: 'string',
     required: true,
-    enum: ['PLACED', 'CONFIRMED', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
+    enum: ['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED'],
     label: 'Status',
   },
 };

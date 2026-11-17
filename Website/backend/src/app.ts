@@ -21,6 +21,8 @@ import addressRoutes from "./routes/address.routes.js";
 import couponRoutes from "./routes/coupon.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import pushRoutes from "./routes/push.routes.js";
+import deliveryConfigRoutes from "./routes/deliveryConfig.routes.js";
+import deliveryRoutes from "./routes/delivery.routes.js";
 import { adminEvents } from './services/realtime.js';
 import { requireAuth, requireAdmin } from './middleware/auth.js';
 import { asyncHandler } from './utils/asyncHandler.js';
@@ -60,6 +62,9 @@ export function createApp() {
   // Image uploads carry base64 payloads, so this route needs a larger JSON cap
   // than the global 1mb limit below. Mounted before the global parser.
   app.use("/api/uploads", express.json({ limit: "8mb" }), uploadRoutes);
+
+  // Webhook needs raw body for signature verification - mount before global json parser
+  app.use("/api/payments/razorpay/webhook", express.raw({ type: 'application/json', limit: '1mb' }));
 
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: true }));
@@ -109,6 +114,8 @@ export function createApp() {
   app.use("/api/addresses", addressRoutes);
   app.use("/api/coupons", couponRoutes);
   app.use("/api/push", pushRoutes);
+  app.use("/api/delivery", deliveryRoutes);
+  app.use("/api/admin/delivery-config", deliveryConfigRoutes);
 
   app.use(notFound);
   app.use(errorHandler);

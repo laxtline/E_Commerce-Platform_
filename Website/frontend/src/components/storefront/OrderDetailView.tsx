@@ -218,7 +218,7 @@ function PaymentBadge({ status }: { status: string }) {
   return <Badge tone="amber">Payment pending</Badge>;
 }
 
-const STEPS = ["PLACED", "CONFIRMED", "SHIPPED", "DELIVERED"] as const;
+const STEPS = ["PLACED", "CONFIRMED", "PACKED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED"] as const;
 
 function StatusTimeline({ status }: { status: string }) {
   const activeIndex = STEPS.indexOf(status as (typeof STEPS)[number]);

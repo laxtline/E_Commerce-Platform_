@@ -17,26 +17,41 @@ export function ProductReviews({ productId }: { productId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Pagination state
+  const [page, setPage] = useState(1);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+
   const [rating, setRating] = useState(0);
   const [comment, setComment] = useState("");
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async (pageNum = 1, cursor?: string) => {
+    if (pageNum === 1) setLoading(true);
+    else setLoadingMore(true);
     setError(null);
     try {
-      const data = await apiFetch<Paginated<Review>>(`/api/reviews/product/${productId}`);
-      setReviews(data.items);
+      let url = `/api/reviews/product/${productId}?limit=10&page=${pageNum}`;
+      if (cursor) url += `&cursor=${cursor}`;
+      const data = await apiFetch<Paginated<Review>>(url);
+      if (pageNum === 1) {
+        setReviews(data.items);
+      } else {
+        setReviews((prev) => [...prev, ...data.items]);
+      }
+      setNextCursor(data.nextCursor ?? null);
+      setPage(data.page);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load reviews");
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
   }, [productId]);
 
   useEffect(() => {
-    load();
+    load(1);
   }, [load]);
 
   const myReview = user ? reviews.find((r) => r.user === user.id) : undefined;
@@ -130,32 +145,39 @@ export function ProductReviews({ productId }: { productId: string }) {
       ) : reviews.length === 0 ? (
         <p className="mt-4 text-sm text-slate-500">No reviews yet. Be the first to review this product!</p>
       ) : (
-        <ul className="mt-4 space-y-4">
-          {reviews.map((r) => (
-            <li key={r.id} className="rounded-2xl border border-slate-100 bg-white p-4 shadow-card">
-              <div className="flex items-center gap-3">
-                {r.userPicture ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={r.userPicture} alt="" className="h-9 w-9 rounded-full" />
-                ) : (
-                  <span className="grid h-9 w-9 place-items-center rounded-full bg-brand-100 text-sm font-bold text-brand-700">
-                    {r.userName?.[0]?.toUpperCase() ?? "U"}
-                  </span>
-                )}
-                <div>
-                  <p className="text-sm font-semibold text-slate-800">{r.userName}</p>
-                  <Rating value={r.rating} size="sm" />
+        <>
+          <ul className="mt-4 space-y-4">
+            {reviews.map((r) => (
+              <li key={r.id} className="rounded-2xl border border-slate-100 bg-white p-4 shadow-card">
+                <div className="flex items-center gap-3">
+                  {r.userPicture ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={r.userPicture} alt="" className="h-9 w-9 rounded-full" />
+                  ) : (
+                    <span className="grid h-9 w-9 place-items-center rounded-full bg-brand-100 text-sm font-bold text-brand-700">
+                      {r.userName?.[0]?.toUpperCase() ?? "U"}
+                    </span>
+                  )}
+                  <div>
+                    <p className="text-sm font-semibold text-slate-800">{r.userName}</p>
+                    <Rating value={r.rating} size="sm" />
+                  </div>
+                  {r.createdAt && (
+                    <span className="ml-auto text-xs text-slate-400">
+                      {new Date(r.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
+                    </span>
+                  )}
                 </div>
-                {r.createdAt && (
-                  <span className="ml-auto text-xs text-slate-400">
-                    {new Date(r.createdAt).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}
-                  </span>
-                )}
-              </div>
-              {r.comment && <p className="mt-2 whitespace-pre-line text-sm text-slate-600">{r.comment}</p>}
-            </li>
-          ))}
-        </ul>
+                {r.comment && <p className="mt-2 whitespace-pre-line text-sm text-slate-600">{r.comment}</p>}
+              </li>
+            ))}
+          </ul>
+          {nextCursor && (
+            <Button variant="outline" className="w-full mt-4" onClick={() => load(page + 1, nextCursor)} loading={loadingMore}>
+              {loadingMore ? "Loading..." : "Load more reviews"}
+            </Button>
+          )}
+        </>
       )}
     </section>
   );

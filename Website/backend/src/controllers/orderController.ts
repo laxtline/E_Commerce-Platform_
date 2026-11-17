@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import mongoose from 'mongoose';
+import PDFDocument from 'pdfkit';
 import { OrderModel } from '../models/Order.js';
 import { ProductModel } from '../models/Product.js';
 import { UserModel } from '../models/User.js';
@@ -15,7 +16,16 @@ import { priceCart } from '../services/cartPricing.js';
 import { money } from '@shared/pricing.js';
 import { notifyNewOrder, notifyOrderStatusChange, notifyAdmins } from '../services/push.js';
 import { getEncryptionService } from '../services/encryption.js';
-import type { OrderStatus, ShippingAddress } from '@shared/types/index.js';
+import { env, razorpayEnabled } from '../config/env.js';
+import { calculateDeliveryFee as dbCalculateDeliveryFee } from '../services/delivery.js';
+import type { OrderStatus, ShippingAddress, ReturnStatus } from '@shared/types/index.js';
+
+const RAZORPAY_API = 'https://api.razorpay.com/v1';
+
+function razorpayAuthHeader(): string {
+  const token = Buffer.from(`${env.razorpayKeyId}:${env.razorpayKeySecret}`).toString('base64');
+  return `Basic ${token}`;
+}
 
 const sort = { field: 'createdAt', direction: -1, kind: 'date' } as const;
 // TODO: move STATUS_FLOW to shared constants so frontend/admin stay in sync
@@ -53,25 +63,52 @@ export async function createOrder(req: Request, res: Response) {
   const notes = String(req.body.notes ?? '').slice(0, 500);
   const code = String(req.body.couponCode ?? '').trim();
 
+  // Validate COD availability for the pincode using database config
+  const { codAvailable, serviceable } = await dbCalculateDeliveryFee(0, shippingAddress.pincode);
+  if (!serviceable) {
+    throw new ApiError(400, `Delivery is not available to pincode ${shippingAddress.pincode}.`);
+  }
+  if (paymentMethod === 'COD' && !codAvailable) {
+    throw new ApiError(400, `Cash on Delivery is not available for pincode ${shippingAddress.pincode}. Please choose online payment.`);
+  }
+
   // transaction prevents overselling, double checkout, coupon limit races
+  // For RAZORPAY: reserve stock now, deduct on payment.captured webhook
+  // For COD: deduct stock immediately (no payment gateway)
   const order = await mongoose.connection.transaction(async (session) => {
-    const priced = await priceCart(userId, session);
+    const priced = await priceCart(userId, session, shippingAddress.pincode);
     const resolved = code ? await resolveCoupon(code, userId, priced, session) : null;
-    for (const line of priced.items) {
-      const stock = await ProductModel.updateOne({ _id: line.product, isActive: true, stock: { $gte: line.quantity } },
-        { $inc: { stock: -line.quantity } }, { session });
-      if (!stock.modifiedCount) throw new ApiError(409, `"${line.title}" has insufficient stock. Update your cart.`);
+
+    if (paymentMethod === 'RAZORPAY') {
+      // Reserve stock for online payment orders
+      for (const line of priced.items) {
+        const result = await ProductModel.updateOne(
+          { _id: line.product, isActive: true, $expr: { $gte: ['$stock', { $add: ['$reservedStock', line.quantity] }] } },
+          { $inc: { reservedStock: line.quantity } },
+          { session }
+        );
+        if (!result.modifiedCount) throw new ApiError(409, `"${line.title}" has insufficient stock. Update your cart.`);
+      }
+    } else {
+      // COD: deduct stock immediately
+      for (const line of priced.items) {
+        const stock = await ProductModel.updateOne({ _id: line.product, isActive: true, stock: { $gte: line.quantity } },
+          { $inc: { stock: -line.quantity } }, { session });
+        if (!stock.modifiedCount) throw new ApiError(409, `"${line.title}" has insufficient stock. Update your cart.`);
+      }
     }
+
     const discount = resolved?.discount ?? 0;
     const now = new Date();
+    const heavyProductFee = priced.heavyProductFee ?? 0;
     const [created] = await OrderModel.create([{
       user: userId, items: priced.items, shippingAddress, paymentMethod, paymentStatus: 'PENDING', status: 'PLACED',
-      itemsTotal: priced.itemsTotal, deliveryFee: priced.deliveryFee, discount,
+      itemsTotal: priced.itemsTotal, deliveryFee: priced.deliveryFee, heavyProductFee, discount,
       coupon: resolved?.coupon._id ?? null, couponCode: resolved?.coupon.code ?? '',
       couponSnapshot: resolved ? { code: resolved.coupon.code, description: resolved.coupon.description,
         type: resolved.coupon.type, value: resolved.coupon.value, maxDiscount: resolved.coupon.maxDiscount,
         scope: resolved.coupon.scope, eligibleTotal: resolved.eligibleTotal } : null,
-      total: money(priced.itemsTotal + priced.deliveryFee - discount), notes,
+      total: money(priced.itemsTotal + priced.deliveryFee + heavyProductFee - discount), notes,
       statusHistory: [{ status: 'PLACED', timestamp: now, note: 'Order placed' }],
     }], { session });
     if (resolved) {
@@ -122,15 +159,44 @@ async function changeStatus(req: Request, next: OrderStatus, ownerOnly: boolean)
     if (!current) throw new ApiError(404, 'Order not found.');
     if (ownerOnly && String(current.user) !== String(req.user!._id)) throw new ApiError(403, 'Not allowed.');
     if (!STATUS_FLOW[current.status as OrderStatus]?.includes(next)) throw new ApiError(400, `Cannot change status from ${current.status} to ${next}.`);
+
+    // Prevent fulfilling unpaid prepaid orders
+    if (current.paymentMethod === 'RAZORPAY' && current.paymentStatus !== 'PAID') {
+      // Allow cancellation of unpaid orders, but block fulfillment
+      if (next !== 'CANCELLED') {
+        throw new ApiError(400, 'Cannot advance unpaid online order. Payment must be completed first.');
+      }
+    }
+
+    // Prevent using Razorpay when gateway is disabled
+    if (current.paymentMethod === 'RAZORPAY' && !razorpayEnabled) {
+      if (next !== 'CANCELLED') {
+        throw new ApiError(503, 'Online payment is not available. Cannot process this order.');
+      }
+    }
+
     if (next === 'CANCELLED') {
       for (const line of current.items) {
-        if (line.product) await ProductModel.updateOne({ _id: line.product }, { $inc: { stock: line.quantity } }, { session });
+        if (line.product) {
+          if (current.paymentMethod === 'RAZORPAY') {
+            // Release reserved stock for online payment orders
+            await ProductModel.updateOne({ _id: line.product }, { $inc: { reservedStock: -line.quantity } }, { session });
+          } else {
+            // Restore actual stock for COD orders
+            await ProductModel.updateOne({ _id: line.product }, { $inc: { stock: line.quantity } }, { session });
+          }
+        }
       }
     }
     const note = String(req.body.note ?? '').slice(0, 500);
     current.status = next;
     addStatusHistory(current, next, note || `Status changed to ${next}`, String(req.user!._id));
-    if (next === 'DELIVERED' && current.paymentMethod === 'COD') current.paymentStatus = 'PAID';
+
+    // For COD, do NOT auto-mark as PAID on DELIVERED - requires separate cash collection
+    // Payment collection for COD should be tracked separately
+    if (next === 'DELIVERED' && current.paymentMethod === 'COD' && current.paymentStatus !== 'PAID') {
+      current.paymentStatus = 'PENDING'; // Keep as PENDING for cash collection tracking
+    }
     await current.save({ session });
     return current;
   });
@@ -171,7 +237,17 @@ export async function updateOrderStatus(req: Request, res: Response) {
 export async function orderAnalytics(_req: Request, res: Response) {
   // 30-day window, IST dates. MongoDB aggregates, no order arrays in memory.
   const since = new Date(Date.now() - 30 * 86400000);
-  const match = { status: { $ne: 'CANCELLED' }, createdAt: { $gte: since } };
+  // Exclude cancelled orders and unpaid/failed online orders from revenue
+  // For COD: only count as revenue when cash is collected (paymentStatus === 'PAID')
+  // For RAZORPAY: only count when paymentStatus === 'PAID'
+  const match = {
+    status: { $ne: 'CANCELLED' },
+    createdAt: { $gte: since },
+    $or: [
+      { paymentMethod: 'COD', paymentStatus: 'PAID' }, // Only collected COD orders
+      { paymentMethod: 'RAZORPAY', paymentStatus: 'PAID' }, // Only PAID online orders (exclude FAILED)
+    ],
+  };
   const [days, top, coupons] = await Promise.all([
     OrderModel.aggregate([
       { $match: match }, { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'Asia/Kolkata' } },
@@ -194,9 +270,18 @@ export async function orderAnalytics(_req: Request, res: Response) {
 }
 
 export async function orderStats(_req: Request, res: Response) {
+  // Match the same criteria as orderAnalytics: exclude cancelled and unpaid/failed online orders from revenue
+  // For COD: only count as revenue when cash is collected (paymentStatus === 'PAID')
+  // For RAZORPAY: only count when paymentStatus === 'PAID'
+  const match = {
+    $or: [
+      { paymentMethod: 'COD', paymentStatus: 'PAID' },
+      { paymentMethod: 'RAZORPAY', paymentStatus: 'PAID' }, // Only PAID online orders (exclude FAILED)
+    ],
+  };
   const [rows] = await OrderModel.aggregate([{ $facet: {
-    statuses: [{ $group: { _id: '$status', count: { $sum: 1 } } }],
-    sales: [{ $match: { status: { $ne: 'CANCELLED' } } }, { $group: { _id: null,
+    statuses: [{ $match: { status: { $ne: 'CANCELLED' } } }, { $group: { _id: '$status', count: { $sum: 1 } } }],
+    sales: [{ $match: { ...match, status: { $ne: 'CANCELLED' } } }, { $group: { _id: null,
       sales: { $sum: { $sum: '$items.quantity' } }, revenue: { $sum: '$total' },
       couponUses: { $sum: { $cond: [{ $ne: ['$couponCode', ''] }, 1, 0] } }, discountGiven: { $sum: '$discount' },
     } }],
@@ -217,6 +302,10 @@ export async function updateCourierInfo(req: Request, res: Response) {
     throw new ApiError(400, 'At least courier name or tracking ID is required.');
   }
 
+  // First get the current order to know its status
+  const currentOrder = await OrderModel.findById(req.params.id);
+  if (!currentOrder) throw new ApiError(404, 'Order not found.');
+
   const updated = await OrderModel.findByIdAndUpdate(
     req.params.id,
     {
@@ -225,7 +314,7 @@ export async function updateCourierInfo(req: Request, res: Response) {
         'courierInfo.trackingId': trackingId?.trim() ?? '',
         'courierInfo.trackingUrl': trackingUrl?.trim() ?? '',
       },
-      $push: { statusHistory: { status: '$status', timestamp: new Date(), note: `Courier info updated: ${courierName} - ${trackingId}` } },
+      $push: { statusHistory: { status: currentOrder.status, timestamp: new Date(), note: `Courier info updated: ${courierName} - ${trackingId}` } },
     },
     { new: true }
   ).populate('user', 'name email');
@@ -239,6 +328,36 @@ export async function updateCourierInfo(req: Request, res: Response) {
   void notifyOrderStatusChange(order._id.toString(), `Tracking: ${courierName}`, order.shippingAddress.fullName);
 
   res.json({ success: true, data: order, message: 'Courier info updated.' });
+}
+
+// POST /api/orders/:id/collect-cash — Admin: mark COD order as cash collected.
+export async function collectCash(req: Request, res: Response) {
+  const order = await OrderModel.findById(req.params.id);
+  if (!order) throw new ApiError(404, 'Order not found.');
+
+  if (order.paymentMethod !== 'COD') {
+    throw new ApiError(400, 'Cash collection is only for COD orders.');
+  }
+
+  if (order.status !== 'DELIVERED') {
+    throw new ApiError(400, 'Cash can only be collected for delivered orders.');
+  }
+
+  if (order.cashCollectedAt) {
+    throw new ApiError(400, 'Cash already collected for this order.');
+  }
+
+  order.paymentStatus = 'PAID';
+  order.cashCollectedAt = new Date();
+  order.collectedBy = req.user!._id;
+  order.statusHistory.push({
+    status: order.status,
+    timestamp: new Date(),
+    note: `Cash collected by admin ${req.user!._id}`,
+  });
+  await order.save();
+
+  res.json({ success: true, data: order, message: 'Cash collection recorded.' });
 }
 
 // POST /api/orders/:id/return — Customer requests a return.
@@ -300,7 +419,7 @@ export async function requestReturn(req: Request, res: Response) {
 
 // GET /api/orders/:id/return — Get return status for an order (customer or admin).
 export async function getReturnStatus(req: Request, res: Response) {
-  const order = await OrderModel.findById(req.params.id).select('returnRequest');
+  const order = await OrderModel.findById(req.params.id).select('returnRequest user');
   if (!order) throw new ApiError(404, 'Order not found.');
   if (String(order.user) !== String(req.user!._id) && req.user!.role !== 'ADMIN') {
     throw new ApiError(403, 'Not allowed.');
@@ -336,9 +455,21 @@ export async function listReturns(req: Request, res: Response) {
   res.json({ success: true, data: cursorPage(rows, total, page, limit, sort, filter) });
 }
 
+// Return state machine - enforces valid transitions
+const RETURN_STATUS_FLOW: Record<ReturnStatus, ReturnStatus[]> = {
+  REQUESTED: ['APPROVED', 'REJECTED'],
+  APPROVED: ['PICKUP_SCHEDULED', 'REJECTED'],
+  PICKUP_SCHEDULED: ['PICKED_UP', 'REJECTED'],
+  PICKED_UP: ['RECEIVED', 'REJECTED'],
+  RECEIVED: ['REFUND_INITIATED', 'REJECTED'],
+  REFUND_INITIATED: ['REFUNDED'],
+  REFUNDED: [],
+  REJECTED: [],
+};
+
 // PUT /api/admin/returns/:id — Admin: update return status.
 export async function updateReturnStatus(req: Request, res: Response) {
-  const next = String(req.body.status).toUpperCase();
+  const next = String(req.body.status).toUpperCase() as ReturnStatus;
   const validStatuses = ['APPROVED', 'PICKUP_SCHEDULED', 'PICKED_UP', 'RECEIVED', 'REFUND_INITIATED', 'REFUNDED', 'REJECTED'];
   if (!validStatuses.includes(next)) throw new ApiError(400, 'Invalid return status.');
 
@@ -347,7 +478,28 @@ export async function updateReturnStatus(req: Request, res: Response) {
   const trackingId = String(req.body.trackingId ?? '').trim();
   const trackingUrl = String(req.body.trackingUrl ?? '').trim();
 
-  const returnDoc = await ReturnModel.findByIdAndUpdate(
+  const returnDoc = await ReturnModel.findById(req.params.id).populate('order').populate('user', 'name email');
+  if (!returnDoc) throw new ApiError(404, 'Return not found.');
+
+  // Enforce state transitions
+  const currentStatus = returnDoc.status as ReturnStatus;
+  const allowedNext = RETURN_STATUS_FLOW[currentStatus] ?? [];
+  if (!allowedNext.includes(next)) {
+    throw new ApiError(400, `Cannot transition return from ${currentStatus} to ${next}. Allowed: ${allowedNext.join(', ')}`);
+  }
+
+  // Additional validation: REFUNDED requires a completed refund
+  if (next === 'REFUNDED') {
+    if (!returnDoc.refund) {
+      throw new ApiError(400, 'Cannot mark as REFUNDED without an initiated refund.');
+    }
+    const refundDoc = await RefundModel.findById(returnDoc.refund);
+    if (!refundDoc || refundDoc.status !== 'COMPLETED') {
+      throw new ApiError(400, 'Cannot mark as REFUNDED until refund is completed.');
+    }
+  }
+
+  const updatedReturn = await ReturnModel.findByIdAndUpdate(
     req.params.id,
     {
       $set: {
@@ -362,17 +514,17 @@ export async function updateReturnStatus(req: Request, res: Response) {
     { new: true }
   ).populate('order').populate('user', 'name email');
 
-  if (!returnDoc) throw new ApiError(404, 'Return not found.');
+  if (!updatedReturn) throw new ApiError(404, 'Return not found.');
 
   // Update order's returnRequest
-  const order = await OrderModel.findById(returnDoc.order._id);
+  const order = await OrderModel.findById(updatedReturn.order._id);
   if (order) {
     const currentReturn = order.returnRequest;
     order.returnRequest = {
       requestedAt: currentReturn?.requestedAt,
       reason: currentReturn?.reason ?? '',
       pickupAddress: currentReturn?.pickupAddress,
-      status: next as any,
+      status: next,
       adminNotes,
       ...(courierName && { courierName }),
       ...(trackingId && { trackingId }),
@@ -383,14 +535,14 @@ export async function updateReturnStatus(req: Request, res: Response) {
   }
 
   // Notify customer
-  const user = await UserModel.findById(returnDoc.user).select('email name');
-  if (user?.email) {
-    void sendOrderStatusEmail(user.email, { ...order!.toObject(), status: next, shippingAddress: order!.shippingAddress });
+  const user = await UserModel.findById(updatedReturn.user._id).select('email name');
+  if (user?.email && order) {
+    void sendOrderStatusEmail(user.email, { ...order.toObject(), status: next, shippingAddress: order.shippingAddress });
   }
   const customerName = user?.name ?? 'Customer';
-  void notifyOrderStatusChange(returnDoc.order._id.toString(), `Return ${next}`, customerName);
+  void notifyOrderStatusChange(updatedReturn.order._id.toString(), `Return ${next}`, customerName);
 
-  res.json({ success: true, data: returnDoc, message: `Return ${next.toLowerCase()}.` });
+  res.json({ success: true, data: updatedReturn, message: `Return ${next.toLowerCase()}.` });
 }
 
 // POST /api/admin/returns/:id/refund — Admin: initiate refund for a return.
@@ -419,6 +571,20 @@ export async function initiateRefund(req: Request, res: Response) {
   }
   if (returnDoc.refund) throw new ApiError(400, 'Refund already initiated for this return.');
 
+  // Validate refund amount against order's refundable amount
+  const order = await OrderModel.findById(returnDoc.order._id);
+  if (!order) throw new ApiError(404, 'Associated order not found.');
+
+  // For online payments, only paid amount can be refunded
+  // For COD, refund amount should not exceed order total
+  const maxRefundable = order.paymentMethod === 'RAZORPAY' && order.paymentStatus === 'PAID'
+    ? order.total
+    : order.total;
+
+  if (amount > maxRefundable) {
+    throw new ApiError(400, `Refund amount (₹${amount}) cannot exceed order total (₹${maxRefundable}).`);
+  }
+
   const encryption = getEncryptionService();
   const encryptedFields = encryption.encryptFields({
     upiId: upiId ?? '',
@@ -438,42 +604,81 @@ export async function initiateRefund(req: Request, res: Response) {
     status: 'PENDING',
   });
 
+  // If order was paid via Razorpay, initiate refund via Razorpay API
+  let razorpayRefundId = '';
+  if (razorpayEnabled && order.paymentMethod === 'RAZORPAY' && order.paymentStatus === 'PAID' && order.razorpayPaymentId) {
+    try {
+      const resp = await fetch(`${RAZORPAY_API}/payments/${order.razorpayPaymentId}/refund`, {
+        method: 'POST',
+        headers: {
+          Authorization: razorpayAuthHeader(),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          amount: Math.round(amount * 100), // paise
+          speed: 'normal',
+          notes: { returnId: returnDoc._id.toString(), orderId: order._id.toString() },
+        }),
+      });
+
+      if (resp.ok) {
+        const rzpRefund = (await resp.json()) as { id: string; status: string };
+        razorpayRefundId = rzpRefund.id;
+        refundDoc.razorpayRefundId = razorpayRefundId;
+        // If Razorpay refund is already processed, update status
+        if (rzpRefund.status === 'processed') {
+          refundDoc.status = 'COMPLETED';
+          refundDoc.processedAt = new Date();
+        }
+        await refundDoc.save();
+      } else {
+        const detail = await resp.text().catch(() => '');
+        console.error(`[refund] Razorpay refund failed: ${resp.status} ${detail}`);
+        // Don't fail the whole request; refundDoc stays PENDING for manual processing
+      }
+    } catch (err) {
+      console.error('[refund] Razorpay refund API error:', err);
+      // Don't fail the whole request; refundDoc stays PENDING for manual processing
+    }
+  }
+
   // Update return with refund reference
   returnDoc.refund = refundDoc._id;
   returnDoc.status = 'REFUND_INITIATED';
   returnDoc.statusHistory.push({ status: 'REFUND_INITIATED', timestamp: new Date(), note: `Refund initiated: ${method} ₹${amount}`, updatedBy: req.user!._id });
   await returnDoc.save();
 
-  // Update order
-  const order = await OrderModel.findById(returnDoc.order._id);
-  if (order) {
-    const currentReturn = order.returnRequest;
-    order.returnRequest = {
+  // Update order (re-fetch to get latest)
+  const updatedOrder = await OrderModel.findById(returnDoc.order._id);
+  if (updatedOrder) {
+    const currentReturn = updatedOrder.returnRequest;
+    updatedOrder.returnRequest = {
       requestedAt: currentReturn?.requestedAt,
       reason: currentReturn?.reason ?? '',
       pickupAddress: currentReturn?.pickupAddress,
       status: 'REFUND_INITIATED',
       adminNotes: currentReturn?.adminNotes ?? '',
     };
-    order.refund = {
+    updatedOrder.refund = {
       method,
       amount,
-      status: 'PENDING',
+      status: refundDoc.status, // Use the actual status from refundDoc (may be COMPLETED if Razorpay processed it)
       // Encrypted fields are stored but not exposed to client
       upiIdEncrypted: encryptedFields.upiId,
       bankAccountEncrypted: encryptedFields.bankAccount,
       bankIfscEncrypted: encryptedFields.bankIfsc,
       bankNameEncrypted: encryptedFields.bankName,
       accountHolderNameEncrypted: encryptedFields.accountHolderName,
+      razorpayRefundId,
     };
-    addStatusHistory(order, order.status, `Refund initiated: ${method} ₹${amount}`, String(req.user!._id));
-    await order.save();
+    addStatusHistory(updatedOrder, updatedOrder.status, `Refund initiated: ${method} ₹${amount}`, String(req.user!._id));
+    await updatedOrder.save();
   }
 
   // Notify customer
   const user = await UserModel.findById(returnDoc.user).select('email name');
-  if (user?.email && order) {
-    void sendOrderStatusEmail(user.email, { ...order.toObject(), status: 'REFUND_INITIATED', shippingAddress: order.shippingAddress });
+  if (user?.email && updatedOrder) {
+    void sendOrderStatusEmail(user.email, { ...updatedOrder.toObject(), status: 'REFUND_INITIATED', shippingAddress: updatedOrder.shippingAddress });
   }
   const customerName = user?.name ?? 'Customer';
   void notifyOrderStatusChange(returnDoc.order._id.toString(), `Refund Initiated: ${method} ₹${amount}`, customerName);
@@ -498,6 +703,10 @@ export async function completeRefund(req: Request, res: Response) {
 
   if (!refundDoc) throw new ApiError(404, 'Refund not found.');
 
+  // Get the order first to know its current status
+  const orderDoc = await OrderModel.findById(refundDoc.order._id);
+  if (!orderDoc) throw new ApiError(404, 'Order not found.');
+
   // Update return
   const returnDoc = await ReturnModel.findByIdAndUpdate(
     refundDoc.return._id,
@@ -505,12 +714,12 @@ export async function completeRefund(req: Request, res: Response) {
     { new: true }
   );
 
-  // Update order
+  // Update order - use actual status instead of '$status'
   const order = await OrderModel.findByIdAndUpdate(
     refundDoc.order._id,
     {
       $set: { 'refund.status': 'COMPLETED', 'refund.processedAt': new Date(), 'refund.processedBy': req.user!._id, 'returnRequest.status': 'REFUNDED' },
-      $push: { statusHistory: { status: '$status', timestamp: new Date(), note: 'Refund completed', updatedBy: req.user!._id } },
+      $push: { statusHistory: { status: orderDoc.status, timestamp: new Date(), note: 'Refund completed', updatedBy: req.user!._id } },
     },
     { new: true }
   );
@@ -586,4 +795,159 @@ export async function getOrderTracking(req: Request, res: Response) {
     returnRequest: order.returnRequest,
     refund: order.refund,
   } });
+}
+
+// GET /api/orders/:id/invoice — Generate and stream PDF invoice.
+export async function generateInvoice(req: Request, res: Response) {
+  const order = await OrderModel.findById(req.params.id).populate('user', 'name email');
+  if (!order) throw new ApiError(404, 'Order not found.');
+  if (String(order.user._id) !== String(req.user!._id) && req.user!.role !== 'ADMIN') throw new ApiError(403, 'Not allowed.');
+
+  const user = order.user as any;
+  const brand = (await import('../config/env.js')).env; // Access brand info from env if needed
+
+  // Create PDF document
+  const doc = new PDFDocument({ margin: 50, size: 'A4' });
+  const filename = `invoice-${order._id.toString().slice(-6).toUpperCase()}.pdf`;
+
+  // Set response headers for PDF download
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+  // Pipe PDF to response
+  doc.pipe(res);
+
+  // --- Header ---
+  doc.fontSize(24).font('Helvetica-Bold').text('INVOICE', { align: 'center' });
+  doc.moveDown(0.5);
+
+  // Brand info
+  doc.fontSize(10).font('Helvetica').text('Ramachandra Traders', { align: 'center' });
+  doc.text('GSTIN: XXXXXXXXXXXXXXX', { align: 'center' });
+  doc.text('Email: support@ramachandratraders.com', { align: 'center' });
+  doc.text('Phone: +91-XXXXXXXXXX', { align: 'center' });
+  doc.moveDown(1);
+
+  // Invoice details table
+  const startX = 50;
+  let y = doc.y;
+
+  // Invoice info
+  doc.fontSize(10).font('Helvetica-Bold').text('Invoice Details:', startX, y);
+  doc.font('Helvetica').text(`Invoice #: ${order._id.toString().slice(-6).toUpperCase()}`, startX + 200, y);
+  y += 15;
+  doc.font('Helvetica-Bold').text('Date:', startX, y);
+  doc.font('Helvetica').text(new Date(order.createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }), startX + 200, y);
+  y += 15;
+  doc.font('Helvetica-Bold').text('Order ID:', startX, y);
+  doc.font('Helvetica').text(order._id.toString(), startX + 200, y);
+  y += 15;
+  doc.font('Helvetica-Bold').text('Payment Method:', startX, y);
+  doc.font('Helvetica').text(order.paymentMethod === 'COD' ? 'Cash on Delivery' : 'Online Payment (Razorpay)', startX + 200, y);
+  y += 15;
+  doc.font('Helvetica-Bold').text('Payment Status:', startX, y);
+  doc.font('Helvetica').text(order.paymentStatus, startX + 200, y);
+  y += 15;
+  doc.font('Helvetica-Bold').text('Order Status:', startX, y);
+  doc.font('Helvetica').text(order.status, startX + 200, y);
+
+  doc.y = y + 20;
+
+  // Bill To
+  doc.fontSize(12).font('Helvetica-Bold').text('Bill To:', startX);
+  doc.fontSize(10).font('Helvetica');
+  doc.text(user?.name ?? 'Customer', startX, doc.y + 5);
+  doc.text(order.shippingAddress.fullName, startX, doc.y + 15);
+  doc.text(order.shippingAddress.line1, startX, doc.y + 15);
+  if (order.shippingAddress.line2) doc.text(order.shippingAddress.line2, startX, doc.y + 15);
+  doc.text(`${order.shippingAddress.city}, ${order.shippingAddress.state} - ${order.shippingAddress.pincode}`, startX, doc.y + 15);
+  doc.text(`Phone: ${order.shippingAddress.phone}`, startX, doc.y + 15);
+  if (user?.email) doc.text(`Email: ${user.email}`, startX, doc.y + 15);
+
+  doc.moveDown(1);
+
+  // Items table header
+  const tableTop = doc.y;
+  const col1 = startX; // Item
+  const col2 = 280;    // Qty
+  const col3 = 330;    // Unit Price
+  const col4 = 420;    // Total
+
+  doc.fontSize(10).font('Helvetica-Bold');
+  doc.text('Item', col1, tableTop);
+  doc.text('Qty', col2, tableTop);
+  doc.text('Unit Price', col3, tableTop);
+  doc.text('Total', col4, tableTop);
+
+  // Draw header line
+  doc.moveTo(startX, tableTop + 15).lineTo(500, tableTop + 15).stroke();
+
+  let rowY = tableTop + 20;
+  doc.font('Helvetica');
+
+  for (const item of order.items) {
+    // Check if we need a new page
+    if (rowY > 700) {
+      doc.addPage();
+      rowY = 50;
+    }
+
+    const title = item.title.length > 35 ? item.title.substring(0, 32) + '...' : item.title;
+    doc.text(title, col1, rowY, { width: 170 });
+    doc.text(item.quantity.toString(), col2, rowY);
+    doc.text(`₹${item.unitPrice.toLocaleString('en-IN')}`, col3, rowY);
+    doc.text(`₹${item.lineTotal.toLocaleString('en-IN')}`, col4, rowY);
+    rowY += 20;
+  }
+
+  // Draw line after items
+  doc.moveTo(startX, rowY).lineTo(500, rowY).stroke();
+  rowY += 10;
+
+  // Totals
+  const totalsX = 300;
+  doc.fontSize(10).font('Helvetica');
+  doc.text('Items Total:', totalsX, rowY);
+  doc.text(`₹${order.itemsTotal.toLocaleString('en-IN')}`, col4, rowY);
+  rowY += 18;
+
+  doc.text('Delivery Fee:', totalsX, rowY);
+  doc.text(order.deliveryFee === 0 ? 'FREE' : `₹${order.deliveryFee.toLocaleString('en-IN')}`, col4, rowY);
+  rowY += 18;
+
+  if (order.heavyProductFee && order.heavyProductFee > 0) {
+    doc.text('Heavy Product Delivery:', totalsX, rowY);
+    doc.text(`₹${order.heavyProductFee.toLocaleString('en-IN')}`, col4, rowY);
+    rowY += 18;
+  }
+
+  if (order.discount && order.discount > 0) {
+    doc.font('Helvetica').text(`Discount${order.couponCode ? ` (${order.couponCode})` : ''}:`, totalsX, rowY);
+    doc.font('Helvetica').text(`-₹${order.discount.toLocaleString('en-IN')}`, col4, rowY);
+    rowY += 18;
+  }
+
+  doc.moveTo(startX, rowY).lineTo(500, rowY).stroke();
+  rowY += 10;
+
+  doc.fontSize(12).font('Helvetica-Bold');
+  doc.text('Grand Total:', totalsX, rowY);
+  doc.text(`₹${order.total.toLocaleString('en-IN')}`, col4, rowY);
+
+  doc.moveDown(2);
+
+  // Footer notes
+  doc.fontSize(9).font('Helvetica');
+  doc.text('Notes:', startX);
+  doc.text('1. This is a computer-generated invoice and does not require a signature.', startX + 10, doc.y + 5);
+  doc.text('2. For COD orders, payment is collected upon delivery.', startX + 10, doc.y + 15);
+  doc.text('3. For online payments, payment is processed via Razorpay.', startX + 10, doc.y + 15);
+  doc.text('4. Returns must be requested within 7 days of delivery.', startX + 10, doc.y + 15);
+  doc.text('5. For any queries, contact support@ramachandratraders.com', startX + 10, doc.y + 15);
+
+  doc.moveDown(1);
+  doc.fontSize(9).font('Helvetica-Oblique').text('Thank you for shopping with Ramachandra Traders!', { align: 'center' });
+
+  // Finalize PDF
+  doc.end();
 }

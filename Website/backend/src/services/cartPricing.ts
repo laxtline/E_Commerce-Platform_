@@ -1,7 +1,8 @@
 import type { ClientSession, Types } from 'mongoose';
 import { CartModel } from '../models/Cart.js';
 import { ApiError } from '../utils/ApiError.js';
-import { DELIVERY_FEE, FREE_DELIVERY_OVER, money, unitPriceForQty, MAX_CART_LINES } from '@shared/pricing.js';
+import { money, unitPriceForQty, MAX_CART_LINES, calculateDeliveryFee } from '@shared/pricing.js';
+import { calculateDeliveryFee as dbCalculateDeliveryFee, calculateHeavyProductFee } from '../services/delivery.js';
 
 export interface PricedLine {
   product: Types.ObjectId;
@@ -12,9 +13,10 @@ export interface PricedLine {
   unitPrice: number;
   quantity: number;
   lineTotal: number;
+  weight?: number;
 }
 
-export async function priceCart(userId: string, session?: ClientSession) {
+export async function priceCart(userId: string, session?: ClientSession, pincode?: string) {
   const cart = await CartModel.findOne({ user: userId }).session(session ?? null).populate('items.product');
   if (!cart?.items.length) throw new ApiError(400, 'Your cart is empty.');
   if (cart.items.length > MAX_CART_LINES) throw new ApiError(400, `A cart can contain at most ${MAX_CART_LINES} products.`);
@@ -44,15 +46,35 @@ export async function priceCart(userId: string, session?: ClientSession) {
       _id: Types.ObjectId; category: Types.ObjectId; title: string; images: string[];
       sku: string; price: number; stock: number; isActive: boolean;
       bulkPricing: { minQty: number; pricePerUnit: number }[];
+      weight?: number;
     };
     if (!Number.isSafeInteger(item.quantity) || item.quantity < 1) throw new ApiError(400, 'Quantity must be a whole number of at least 1.');
     if (item.quantity > p.stock) throw new ApiError(400, `Only ${p.stock} left of "${p.title}". Update your cart.`);
     const unitPrice = unitPriceForQty(p, item.quantity);
     return { product: p._id, category: p.category, title: p.title, image: p.images[0] ?? '', sku: p.sku,
-      quantity: item.quantity, unitPrice, lineTotal: money(unitPrice * item.quantity) };
+      quantity: item.quantity, unitPrice, lineTotal: money(unitPrice * item.quantity), weight: p.weight };
   });
   const itemsTotal = money(items.reduce((sum, item) => sum + item.lineTotal, 0));
-  const deliveryFee = itemsTotal >= FREE_DELIVERY_OVER ? 0 : DELIVERY_FEE;
-  return { cart, items, itemsTotal, deliveryFee };
+
+  // Calculate heavy product fee
+  const heavyProductItems = items.filter(item => item.weight && item.weight > 0).map(item => ({
+    weight: item.weight!,
+    quantity: item.quantity
+  }));
+  const heavyProductResult = await calculateHeavyProductFee(heavyProductItems);
+
+  // Use database-backed delivery fee calculation
+  const deliveryFee = pincode
+    ? (await dbCalculateDeliveryFee(itemsTotal, pincode)).fee
+    : (await calculateDeliveryFee(itemsTotal, pincode || '000000')).fee; // fallback
+
+  return {
+    cart,
+    items,
+    itemsTotal,
+    deliveryFee,
+    heavyProductFee: heavyProductResult.additionalFee,
+    heavyProductBreakdown: heavyProductResult.breakdown
+  };
 }
 export type PricedCart = Awaited<ReturnType<typeof priceCart>>;

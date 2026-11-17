@@ -26,9 +26,6 @@ import { formatINR, unitPriceForQty } from "@/lib/format";
 import { QuantitySelector } from '@/components/ui/QuantitySelector';
 import { LoginDialog } from "@/components/auth/LoginDialog";
 
-const DELIVERY_FEE = 49;
-const FREE_DELIVERY_OVER = 5000;
-
 const EMPTY_ADDRESS: ShippingAddress = {
   fullName: "",
   phone: "",
@@ -38,6 +35,16 @@ const EMPTY_ADDRESS: ShippingAddress = {
   state: "",
   pincode: "",
 };
+
+interface DeliveryCalculation {
+  deliveryFee: number;
+  heavyProductFee: number;
+  heavyProductBreakdown: string;
+  totalDeliveryFee: number;
+  isFree: boolean;
+  codAvailable: boolean;
+  serviceable: boolean;
+}
 
 export function CheckoutView() {
   const dispatch = useAppDispatch();
@@ -59,12 +66,11 @@ export function CheckoutView() {
   const [couponInput, setCouponInput] = useState("");
   const [coupon, setCoupon] = useState<CouponValidation | null>(null);
   const [couponError, setCouponError] = useState<string | null>(null);
-  // Shown when the (currently inactive) online-payment option is clicked.
   const [onlineNotice, setOnlineNotice] = useState(false);
   const [applyingCoupon, setApplyingCoupon] = useState(false);
   const [validatedCart, setValidatedCart] = useState('');
-  // Login dialog state
   const [showLogin, setShowLogin] = useState(false);
+  const [deliveryCalc, setDeliveryCalc] = useState<DeliveryCalculation | null>(null);
   const couponRequest = useRef(0);
   const cartKey = JSON.stringify(cart?.items ?? []);
   const appliedCode = coupon?.code;
@@ -155,6 +161,38 @@ export function CheckoutView() {
     if (user?.name) setAddress((a) => (a.fullName ? a : { ...a, fullName: user.name }));
   }, [user]);
 
+  // Calculate delivery fee when pincode changes
+  useEffect(() => {
+    if (!address.pincode || address.pincode.length !== 6 || !cart?.items) return;
+
+    const items = cart.items
+      .filter((it) => it.product && typeof it.product !== 'string' && it.product.weight)
+      .map((it) => ({
+        weight: (it.product as Product).weight,
+        quantity: it.quantity,
+      }));
+
+    const itemsTotal = lines.reduce((sum, l) => sum + unitPriceForQty(l.product, l.quantity) * l.quantity, 0);
+
+    apiFetch<DeliveryCalculation>("/api/delivery/calculate", {
+      method: "POST",
+      body: JSON.stringify({ itemsTotal, pincode: address.pincode, items }),
+    })
+      .then(setDeliveryCalc)
+      .catch(() => {
+        // Fallback to defaults
+        setDeliveryCalc({
+          deliveryFee: itemsTotal >= 5000 ? 0 : 49,
+          heavyProductFee: 0,
+          heavyProductBreakdown: '',
+          totalDeliveryFee: itemsTotal >= 5000 ? 0 : 49,
+          isFree: itemsTotal >= 5000,
+          codAvailable: true,
+          serviceable: true,
+        });
+      });
+  }, [address.pincode, cartKey]);
+
   useEffect(() => () => void dispatch(clearOrderError()), [dispatch]);
 
   const lines = (cart?.items ?? [])
@@ -185,7 +223,8 @@ export function CheckoutView() {
   }
 
   const itemsTotal = lines.reduce((sum, l) => sum + unitPriceForQty(l.product, l.quantity) * l.quantity, 0);
-  const deliveryFee = itemsTotal >= FREE_DELIVERY_OVER ? 0 : DELIVERY_FEE;
+  const deliveryFee = deliveryCalc?.totalDeliveryFee ?? (itemsTotal >= 5000 ? 0 : 49);
+  const heavyProductFee = deliveryCalc?.heavyProductFee ?? 0;
   const discount = coupon && validatedCart === cartKey ? Math.min(coupon.discount, itemsTotal) : 0;
   const total = Math.max(0, itemsTotal + deliveryFee - discount);
 
@@ -462,8 +501,20 @@ export function CheckoutView() {
           </div>
           <div className="flex justify-between text-slate-600">
             <dt>Delivery</dt>
-            <dd>{deliveryFee === 0 ? "FREE" : formatINR(deliveryFee)}</dd>
+            <dd>{deliveryCalc?.isFree ? "FREE" : formatINR(deliveryCalc?.deliveryFee ?? deliveryFee)}</dd>
           </div>
+          {heavyProductFee > 0 && deliveryCalc?.heavyProductBreakdown && (
+            <div className="relative group">
+              <div className="flex justify-between text-slate-600">
+                <dt>Heavy Product Delivery</dt>
+                <dd>{formatINR(heavyProductFee)}</dd>
+              </div>
+              <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block z-10 w-80 bg-slate-900 text-white text-xs rounded p-2 shadow-lg">
+                {deliveryCalc.heavyProductBreakdown}
+                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-900" />
+              </div>
+            </div>
+          )}
           {discount > 0 && (
             <div className="flex justify-between text-emerald-600">
               <dt>Discount</dt>

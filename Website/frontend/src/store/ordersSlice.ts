@@ -9,6 +9,10 @@ interface OrdersState {
   currentStatus: "idle" | "loading" | "ready" | "error";
   placing: boolean;
   error: string | null;
+  nextCursor: string | null;
+  currentPage: number;
+  totalPages: number;
+  loadingMore: boolean;
 }
 
 const initialState: OrdersState = {
@@ -18,6 +22,10 @@ const initialState: OrdersState = {
   currentStatus: "idle",
   placing: false,
   error: null,
+  nextCursor: null,
+  currentPage: 1,
+  totalPages: 1,
+  loadingMore: false,
 };
 
 export const placeOrder = createAsyncThunk(
@@ -44,7 +52,12 @@ export const placeOrder = createAsyncThunk(
 
 export const fetchMyOrders = createAsyncThunk("orders/mine", async () => {
   const data = await apiFetch<Paginated<Order>>("/api/orders");
-  return data.items;
+  return data; // Return full paginated response
+});
+
+export const loadMoreOrders = createAsyncThunk("orders/loadMore", async (page: number) => {
+  const data = await apiFetch<Paginated<Order>>(`/api/orders?page=${page}`);
+  return data;
 });
 
 export const fetchOrder = createAsyncThunk("orders/one", async (id: string) => {
@@ -90,11 +103,28 @@ const ordersSlice = createSlice({
         state.listStatus = "loading";
       })
       .addCase(fetchMyOrders.fulfilled, (state, action) => {
-        state.list = action.payload;
+        state.list = action.payload.items;
         state.listStatus = "ready";
+        state.nextCursor = action.payload.nextCursor ?? null;
+        state.currentPage = action.payload.page;
+        state.totalPages = action.payload.totalPages;
       })
       .addCase(fetchMyOrders.rejected, (state) => {
         state.listStatus = "error";
+      })
+      // load more orders
+      .addCase(loadMoreOrders.pending, (state) => {
+        state.loadingMore = true;
+      })
+      .addCase(loadMoreOrders.fulfilled, (state, action) => {
+        state.loadingMore = false;
+        state.list = [...state.list, ...action.payload.items];
+        state.nextCursor = action.payload.nextCursor ?? null;
+        state.currentPage = action.payload.page;
+        state.totalPages = action.payload.totalPages;
+      })
+      .addCase(loadMoreOrders.rejected, (state) => {
+        state.loadingMore = false;
       })
       // single order
       .addCase(fetchOrder.pending, (state) => {
